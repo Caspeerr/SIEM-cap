@@ -34,6 +34,16 @@ import {
   X,
   Zap,
 } from "lucide-react";
+type SecurityEvent = {
+  ts?: string;
+  src_ip?: string;
+  dst_ip?: string;
+  src_port?: number | string;
+  dst_port?: number | string;
+  proto?: string;
+  tactic?: string;
+  [key: string]: unknown;
+};
 
 type ViewKey = "overview" | "logs" | "alerts" | "map" | "prediction" | "lab" | "docs";
 
@@ -59,15 +69,7 @@ const sources = [
   { ip: "103.82.118.7", count: 49, color: "gold" },
   { ip: "91.240.118.11", count: 31, color: "mint" },
 ];
-
-const logRows = [
-  ["15:42:18.440", "AUTH", "185.220.101.42", "Repeated login failure", "CRITICAL"],
-  ["15:42:18.215", "EDGE", "45.141.84.19", "SYN sweep · 38 ports", "HIGH"],
-  ["15:42:17.920", "IAM", "103.82.118.7", "Geo-velocity anomaly", "MEDIUM"],
-  ["15:42:17.702", "DNS", "91.240.118.11", "Suspicious TXT lookup", "MEDIUM"],
-  ["15:42:17.488", "API", "172.16.4.22", "Token scope mismatch", "LOW"],
-];
-
+  
 function LogoMark() {
   return (
     <div className="logo-mark" aria-hidden="true">
@@ -175,7 +177,179 @@ function TopologyNode({ icon: Icon, label, value, tone }: { icon: typeof Activit
 }
 
 function LogsView({ onNotice }: { onNotice: (message: string) => void }) {
-  return <WorkspaceView eyebrow="Live telemetry" title="Live event stream" description="Inspect normalized security events as they arrive from the SentinelStream pipeline."><div className="stream-toolbar"><span className="live-pill"><StatusDot /> Streaming now</span><span className="toolbar-muted">2,418 events / sec</span><button className="secondary-button" onClick={() => onNotice("Stream paused for the prototype session.")}><Clock3 size={14} /> Pause stream</button></div><div className="log-table"><div className="log-head"><span>Timestamp</span><span>Source</span><span>Origin</span><span>Event</span><span>Risk</span></div>{logRows.map((row) => <div className="log-row" key={row[0]}><span>{row[0]}</span><span className="log-source">{row[1]}</span><span>{row[2]}</span><span>{row[3]}</span><span className={`log-risk ${row[4].toLowerCase()}`}>{row[4]}</span></div>)}</div></WorkspaceView>;
+  const [logs, setLogs] = useState<SecurityEvent[]>([]);
+  const [connected, setConnected] = useState(false);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    const eventSource = new EventSource(
+      "http://localhost:8000/api/logs/stream"
+    );
+
+    eventSource.onopen = () => {
+      console.log("Connected to SIEM stream");
+      setConnected(true);
+    };
+
+    eventSource.onmessage = (event) => {
+      try {
+        const log: SecurityEvent = JSON.parse(event.data);
+
+        setLogs((previous) => {
+          // Keep the newest 100 events in memory
+          return [log, ...previous].slice(0, 100);
+        });
+      } catch (error) {
+        console.error("Failed to parse log:", error);
+      }
+    };
+
+    eventSource.onerror = () => {
+      console.error("SSE connection error");
+      setConnected(false);
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, []);
+
+  const formatTimestamp = (timestamp?: string) => {
+    if (!timestamp) return "—";
+
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+      return timestamp;
+    }
+
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      fractionalSecondDigits: 3,
+    });
+  };
+
+  const getRisk = (log: SecurityEvent) => {
+    const tactic = String(log.tactic || "").toLowerCase();
+
+    if (
+      tactic.includes("credential") ||
+      tactic.includes("execution") ||
+      tactic.includes("persistence")
+    ) {
+      return "HIGH";
+    }
+
+    if (
+      tactic.includes("discovery") ||
+      tactic.includes("reconnaissance")
+    ) {
+      return "MEDIUM";
+    }
+
+    return "LOW";
+  };
+
+  return (
+    <WorkspaceView
+      eyebrow="Live telemetry"
+      title="Live event stream"
+      description="Inspect normalized security events as they arrive from the SentinelStream pipeline."
+    >
+      <div className="stream-toolbar">
+
+        <span className="live-pill">
+          <StatusDot tone={connected ? "green" : "red"} />
+          {connected ? "Streaming now" : "Disconnected"}
+        </span>
+
+        <span className="toolbar-muted">
+          {logs.length} events loaded
+        </span>
+
+        <button
+          className="secondary-button"
+          onClick={() => {
+            setPaused((value) => !value);
+            onNotice(
+              paused
+                ? "Stream resumed."
+                : "Stream paused."
+            );
+          }}
+        >
+          <Clock3 size={14} />
+          {paused ? "Resume stream" : "Pause stream"}
+        </button>
+
+      </div>
+
+      <div className="log-table">
+
+        <div className="log-head">
+          <span>Timestamp</span>
+          <span>Source</span>
+          <span>Origin</span>
+          <span>Event</span>
+          <span>Risk</span>
+        </div>
+
+        {logs.map((log, index) => {
+
+          const risk = getRisk(log);
+
+          return (
+            <div
+              className="log-row"
+              key={`${log.ts}-${log.src_ip}-${index}`}
+            >
+
+              <span>
+                {formatTimestamp(log.ts)}
+              </span>
+
+              <span className="log-source">
+                {String(log.proto || "NETWORK")}
+              </span>
+
+              <span>
+                {String(log.src_ip || "Unknown")}
+              </span>
+
+              <span>
+                {String(
+                  log.tactic ||
+                  log.event_type ||
+                  log.service ||
+                  "Security event"
+                )}
+              </span>
+
+              <span
+                className={`log-risk ${risk.toLowerCase()}`}
+              >
+                {risk}
+              </span>
+
+            </div>
+          );
+        })}
+
+        {logs.length === 0 && (
+          <div className="log-row">
+            <span>Waiting...</span>
+            <span>—</span>
+            <span>—</span>
+            <span>Waiting for Kafka events</span>
+            <span>—</span>
+          </div>
+        )}
+
+      </div>
+    </WorkspaceView>
+  );
 }
 
 function AlertsView({ onNotice }: { onNotice: (message: string) => void }) {
