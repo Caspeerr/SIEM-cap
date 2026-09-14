@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from kafka import KafkaConsumer
+from rules.engine import evaluate_event
+from alerts.manager import add_alert, get_alerts
 
 
 app = FastAPI(title="SIEM Streaming API")
@@ -57,11 +59,34 @@ def kafka_worker():
 
         print("Received:", event)
 
+        # --------------------------------
+        # RUN SECURITY RULES
+        # --------------------------------
+
+        detected_alerts = evaluate_event(event)
+
+        # --------------------------------
+        # STORE AND BROADCAST ALERTS
+        # --------------------------------
+
+        for alert in detected_alerts:
+            print("ALERT:", alert)
+
+            add_alert(alert)
+
+        # --------------------------------
+        # SEND ORIGINAL LOG TO FRONTEND
+        # --------------------------------
+
         with clients_lock:
             current_clients = list(clients)
 
         for client_queue in current_clients:
-            client_queue.put(event)
+            client_queue.put({
+                "type": "log",
+                "event": event,
+                "alerts": detected_alerts,
+            })
 
 
 @app.on_event("startup")
@@ -116,5 +141,11 @@ async def log_stream():
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-        },
+        }
+        
     )
+@app.get("/api/alerts")
+def get_alert_list():
+    return {
+        "alerts": get_alerts()
+    }
