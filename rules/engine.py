@@ -1,14 +1,16 @@
 from rules.detections import (
     rule_port_scan,
-    rule_suspicious_dns,
-    rule_high_risk_tactic,
+    rule_repeated_connection_failures,
+    rule_large_outbound_transfer,
+    rule_dns_burst,
 )
 
 
 RULES = [
     rule_port_scan,
-    rule_suspicious_dns,
-    rule_high_risk_tactic,
+    rule_repeated_connection_failures,
+    rule_large_outbound_transfer,
+    rule_dns_burst,
 ]
 
 

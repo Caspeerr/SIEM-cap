@@ -46,11 +46,11 @@ print(window["tactic"].value_counts())
 # ============================================
 # STEP 4: Compute real inter-event gaps, scaled for demo speed
 # ============================================
-SPEED_MULTIPLIER = 100   # e.g. 100x means a real 10s gap becomes 0.1s
-MAX_DELAY_SECONDS = 2.0  # cap so a real multi-hour gap doesn't stall the demo
+SPEED_MULTIPLIER = 100  # e.g. 100x means a real 10s gap becomes 0.1s
+MAX_DELAY_SECONDS = 5.0  # cap so a real multi-hour gap doesn't stall the demo
 
 deltas = window["ts"].diff().fillna(0)          # real gap before each row
-scaled_delays = (deltas / SPEED_MULTIPLIER).clip(lower=0, upper=MAX_DELAY_SECONDS)
+scaled_delays = (deltas / SPEED_MULTIPLIER).clip(lower=1, upper=MAX_DELAY_SECONDS)
 
 # ============================================
 # STEP 5: Stream each row into Kafka, preserving order and real spacing
