@@ -1,4 +1,44 @@
-logs/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
 
+# Node / Frontend
+Frontend/node_modules/
+Frontend/dist/
+Frontend/build/
+Frontend/.vite/
+Frontend/.cache/
+Frontend/coverage/
+
+# Logs and generated data
+logs/
+*.log
+*.pid
+
+# Docker / local runtime
+.docker/
+docker-compose.override.yml
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project-specific generated files
 __pycache__/
 *.pyc
