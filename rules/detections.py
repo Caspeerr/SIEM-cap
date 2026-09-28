@@ -1,39 +1,17 @@
 from collections import defaultdict, deque
-
+from ipaddress import ip_address
 
 # ============================================================
-# RULE STATE
-# ============================================================
-# These structures remember recent events so that the SIEM can
-# detect behavior/patterns over time instead of judging only
-# one event at a time.
+# CONFIGURATION
 # ============================================================
 
-
 # ------------------------------------------------------------
-# RULE 1: PORT SCAN
+# RULE 1: BRUTE FORCE / REPEATED CONNECTION FAILURES
 # ------------------------------------------------------------
-# { src_ip: deque of (event_time, dest_port) }
-_port_history = defaultdict(deque)
 
-PORT_SCAN_WINDOW_SECONDS = 30
-PORT_SCAN_THRESHOLD = 10
+BRUTE_FORCE_WINDOW_SECONDS = 60
+BRUTE_FORCE_THRESHOLD = 8
 
-# Prevent the same source from generating the same port-scan
-# alert repeatedly during the same detection window.
-_port_scan_alerted = set()
-
-
-# ------------------------------------------------------------
-# RULE 2: REPEATED CONNECTION FAILURES
-# ------------------------------------------------------------
-# { (src_ip, dest_ip, dest_port): deque of event_time }
-_failed_conn_history = defaultdict(deque)
-
-FAILED_CONN_WINDOW_SECONDS = 60
-FAILED_CONN_THRESHOLD = 5
-
-# Zeek connection states indicating rejected/incomplete attempts.
 FAILED_STATES = {
     "REJ",
     "S0",
@@ -41,75 +19,166 @@ FAILED_STATES = {
     "RSTR",
 }
 
-_failed_alerted = set()
+
+# ------------------------------------------------------------
+# RULE 2: PORT SCAN
+# ------------------------------------------------------------
+
+PORT_SCAN_WINDOW_SECONDS = 30
+PORT_SCAN_THRESHOLD = 15
 
 
 # ------------------------------------------------------------
 # RULE 3: LARGE OUTBOUND TRANSFER
 # ------------------------------------------------------------
-# 1 MB threshold for one connection.
-EXFIL_BYTES_THRESHOLD = 1_000_000
+
+# 50 MB
+LARGE_TRANSFER_BYTES = 50 * 1024 * 1024
 
 
 # ------------------------------------------------------------
-# RULE 4: DNS BURST
+# RULE 4: DNS BURST / POSSIBLE DNS TUNNELING
 # ------------------------------------------------------------
-# { src_ip: deque of event_time }
-_dns_history = defaultdict(deque)
 
 DNS_BURST_WINDOW_SECONDS = 30
-DNS_BURST_THRESHOLD = 15
-
-_dns_burst_alerted = set()
+DNS_BURST_THRESHOLD = 25
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# STATE
 # ============================================================
 
-def _get_event_time(event):
+# (src_ip, dest_ip, dest_port) -> timestamps
+_failed_connection_history = defaultdict(deque)
+
+# src_ip -> (timestamp, destination_port)
+_port_history = defaultdict(deque)
+
+# src_ip -> DNS timestamps
+_dns_history = defaultdict(deque)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _event_time(event):
     """
-    Get the timestamp belonging to the event itself.
+    Return the timestamp supplied by the telemetry.
 
-    Historical Zeek data may be replayed very quickly, so using
-    time.time() would make detection windows inaccurate.
-
-    The event timestamp is therefore used instead.
+    We intentionally use the event timestamp rather than
+    time.time() so replayed Zeek datasets behave correctly.
     """
-
-    ts = event.get("ts")
-
     try:
-        return float(ts)
+        return float(event.get("ts", 0))
     except (TypeError, ValueError):
         return 0.0
 
 
 def _safe_int(value):
-    """
-    Safely convert a value to an integer.
-    """
-
     try:
-        return int(float(value))
+        return int(value)
     except (TypeError, ValueError):
         return None
 
 
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_private_ip(value):
+    """
+    Determine whether an IP belongs to a private/internal range.
+    """
+    try:
+        return ip_address(value).is_private
+    except ValueError:
+        return False
+
+
 # ============================================================
 # RULE 1
-# POSSIBLE PORT SCAN
+# BRUTE FORCE / REPEATED CONNECTION FAILURES
+# ============================================================
+
+def rule_brute_force(event):
+    """
+    Detect repeated failed/incomplete connections from the same
+    source to the same destination service.
+
+    This is intentionally connection-oriented because Zeek's
+    conn.log provides useful state information such as:
+
+        REJ
+        S0
+        RSTO
+        RSTR
+    """
+
+    src_ip = event.get("src_ip")
+    dest_ip = event.get("dest_ip")
+    dest_port = _safe_int(event.get("dest_port"))
+    conn_state = str(event.get("conn_state", "")).upper()
+
+    if not src_ip or not dest_ip or dest_port is None:
+        return None
+
+    if conn_state not in FAILED_STATES:
+        return None
+
+    timestamp = _event_time(event)
+
+    key = (src_ip, dest_ip, dest_port)
+
+    history = _failed_connection_history[key]
+    history.append(timestamp)
+
+    # Remove events outside the detection window.
+    while history and timestamp - history[0] > BRUTE_FORCE_WINDOW_SECONDS:
+        history.popleft()
+
+    if len(history) < BRUTE_FORCE_THRESHOLD:
+        return None
+
+    service = event.get("service") or "unknown"
+
+    return {
+        "rule_id": "BRUTE_FORCE_001",
+        "rule_name": "Repeated Authentication/Connection Failures",
+        "severity": "HIGH",
+        "description": (
+            f"{src_ip} generated {len(history)} failed or incomplete "
+            f"connections to {dest_ip}:{dest_port} "
+            f"within {BRUTE_FORCE_WINDOW_SECONDS} seconds"
+        ),
+        "mitre_technique": "T1110",
+        "mitre_tactic": "Credential Access",
+        "evidence": {
+            "failed_attempts": len(history),
+            "window_seconds": BRUTE_FORCE_WINDOW_SECONDS,
+            "connection_state": conn_state,
+            "service": service,
+        },
+    }
+
+
+# ============================================================
+# RULE 2
+# PORT SCANNING
 # ============================================================
 
 def rule_port_scan(event):
     """
-    Detect possible port scanning.
+    Detect horizontal/vertical port scanning behaviour.
 
-    A source IP must contact more than 10 DISTINCT destination
-    ports within 30 seconds.
+    A source contacting many distinct destination ports within
+    a short period is suspicious.
 
-    This is more meaningful than simply checking whether a
-    connection uses a commonly targeted port.
+    The rule requires DISTINCT destination ports so repeated
+    connections to one service do not become a port-scan alert.
     """
 
     src_ip = event.get("src_ip")
@@ -118,243 +187,163 @@ def rule_port_scan(event):
     if not src_ip or dest_port is None:
         return None
 
-    now = _get_event_time(event)
+    timestamp = _event_time(event)
 
     history = _port_history[src_ip]
+    history.append((timestamp, dest_port))
 
-    history.append((now, dest_port))
-
-    # Remove events outside the detection window.
-    while history and now - history[0][0] > PORT_SCAN_WINDOW_SECONDS:
+    while history and timestamp - history[0][0] > PORT_SCAN_WINDOW_SECONDS:
         history.popleft()
 
-    unique_ports = {
-        port
-        for _, port in history
+    unique_ports = {port for _, port in history}
+
+    if len(unique_ports) < PORT_SCAN_THRESHOLD:
+        return None
+
+    return {
+        "rule_id": "PORT_SCAN_001",
+        "rule_name": "Potential Port Scan",
+        "severity": "HIGH",
+        "description": (
+            f"{src_ip} contacted {len(unique_ports)} distinct "
+            f"destination ports within "
+            f"{PORT_SCAN_WINDOW_SECONDS} seconds"
+        ),
+        "mitre_technique": "T1046",
+        "mitre_tactic": "Discovery",
+        "evidence": {
+            "unique_destination_ports": len(unique_ports),
+            "window_seconds": PORT_SCAN_WINDOW_SECONDS,
+        },
     }
-
-    if len(unique_ports) > PORT_SCAN_THRESHOLD:
-
-        alert_key = (
-            src_ip,
-            tuple(sorted(unique_ports)),
-        )
-
-        if alert_key in _port_scan_alerted:
-            return None
-
-        _port_scan_alerted.add(alert_key)
-
-        return {
-            "rule_id": "PORT_SCAN_001",
-            "rule_name": "Possible Port Scan",
-            "severity": "HIGH",
-            "description": (
-                f"{src_ip} contacted {len(unique_ports)} "
-                f"distinct destination ports within "
-                f"{PORT_SCAN_WINDOW_SECONDS} seconds"
-            ),
-        }
-
-    return None
-
-
-# ============================================================
-# RULE 2
-# REPEATED CONNECTION FAILURES
-# ============================================================
-
-def rule_repeated_connection_failures(event):
-    """
-    Detect repeated failed/rejected connection attempts.
-
-    The same source must repeatedly target the same destination
-    IP and destination port.
-
-    This can indicate:
-      - brute-force attempts
-      - service probing
-      - repeated connection attempts
-      - automated attack activity
-    """
-
-    src_ip = event.get("src_ip")
-    dest_ip = event.get("dest_ip")
-    dest_port = _safe_int(event.get("dest_port"))
-    conn_state = str(event.get("conn_state", "")).upper()
-
-    if conn_state not in FAILED_STATES:
-        return None
-
-    if not src_ip or not dest_ip or dest_port is None:
-        return None
-
-    now = _get_event_time(event)
-
-    key = (
-        src_ip,
-        dest_ip,
-        dest_port,
-    )
-
-    history = _failed_conn_history[key]
-
-    history.append(now)
-
-    # Remove events older than 60 seconds.
-    while history and now - history[0] > FAILED_CONN_WINDOW_SECONDS:
-        history.popleft()
-
-    # More than 5 failures = 6 or more attempts.
-    if len(history) > FAILED_CONN_THRESHOLD:
-
-        if key in _failed_alerted:
-            return None
-
-        _failed_alerted.add(key)
-
-        return {
-            "rule_id": "BRUTE_FORCE_001",
-            "rule_name": "Repeated Connection Failures",
-            "severity": "HIGH",
-            "description": (
-                f"{src_ip} generated {len(history)} "
-                f"failed/rejected connections to "
-                f"{dest_ip}:{dest_port} within "
-                f"{FAILED_CONN_WINDOW_SECONDS} seconds"
-            ),
-        }
-
-    return None
 
 
 # ============================================================
 # RULE 3
-# LARGE OUTBOUND TRANSFER
+# LARGE OUTBOUND DATA TRANSFER
 # ============================================================
 
 def rule_large_outbound_transfer(event):
     """
-    Detect a potentially suspiciously large outbound transfer.
+    Detect unusually large outbound transfers.
 
-    The rule checks orig_bytes because in Zeek connection logs
-    orig_bytes represents bytes sent by the originator.
+    This rule uses Zeek's orig_bytes field.
 
-    This is a threshold-based detection and should be treated
-    as a potential indicator of data exfiltration rather than
-    proof of exfiltration.
+    It is deliberately a threshold-based detection rather than
+    claiming that every large transfer is exfiltration.
     """
-
-    orig_bytes = event.get("orig_bytes")
-
-    try:
-        orig_bytes = float(orig_bytes)
-    except (TypeError, ValueError):
-        return None
-
-    if orig_bytes <= EXFIL_BYTES_THRESHOLD:
-        return None
 
     src_ip = event.get("src_ip")
     dest_ip = event.get("dest_ip")
 
+    if not src_ip or not dest_ip:
+        return None
+
+    orig_bytes = _safe_float(event.get("orig_bytes"))
+
+    if orig_bytes is None:
+        return None
+
+    if orig_bytes < LARGE_TRANSFER_BYTES:
+        return None
+
+    # Only classify this as outbound when the source appears
+    # internal and the destination appears external.
+    if not _is_private_ip(src_ip):
+        return None
+
+    if _is_private_ip(dest_ip):
+        return None
+
+    megabytes = orig_bytes / (1024 * 1024)
+
     return {
         "rule_id": "EXFIL_001",
-        "rule_name": "Large Outbound Transfer",
-        "severity": "MEDIUM",
+        "rule_name": "Large Outbound Data Transfer",
+        "severity": "HIGH",
         "description": (
-            f"{src_ip} sent {int(orig_bytes):,} bytes "
-            f"to {dest_ip} in a single connection"
+            f"Internal host {src_ip} transferred approximately "
+            f"{megabytes:.2f} MB to external host {dest_ip}"
         ),
+        "mitre_technique": "T1041",
+        "mitre_tactic": "Exfiltration",
+        "evidence": {
+            "orig_bytes": int(orig_bytes),
+            "megabytes": round(megabytes, 2),
+            "internal_source": True,
+            "external_destination": True,
+        },
     }
 
 
 # ============================================================
 # RULE 4
-# DNS ACTIVITY BURST
+# DNS BURST / POSSIBLE DNS TUNNELING
 # ============================================================
 
 def rule_dns_burst(event):
     """
-    Detect unusually high DNS activity from one source.
+    Detect unusually frequent DNS connections from a single
+    source.
 
-    Normal systems make DNS requests, so a single DNS request
-    should NOT generate an alert.
-
-    An alert is generated only when the same source generates
-    more than 15 DNS connections within 30 seconds.
-
-    This can indicate:
-      - automated DNS lookups
-      - DNS tunneling
-      - malware beaconing
-      - suspicious automated activity
+    This is a behavioural indicator. It does not claim that
+    DNS traffic is malicious by itself.
     """
 
     src_ip = event.get("src_ip")
+    service = str(event.get("service", "")).lower()
+    dest_port = _safe_int(event.get("dest_port"))
 
-    service = str(
-        event.get("service", "")
-    ).lower()
-
-    dest_port = _safe_int(
-        event.get("dest_port")
-    )
+    if not src_ip:
+        return None
 
     is_dns = (
         service == "dns"
         or dest_port == 53
     )
 
-    if not is_dns or not src_ip:
+    if not is_dns:
         return None
 
-    now = _get_event_time(event)
+    timestamp = _event_time(event)
 
     history = _dns_history[src_ip]
+    history.append(timestamp)
 
-    history.append(now)
-
-    # Remove DNS events older than 30 seconds.
-    while history and now - history[0] > DNS_BURST_WINDOW_SECONDS:
+    while history and timestamp - history[0] > DNS_BURST_WINDOW_SECONDS:
         history.popleft()
 
-    if len(history) > DNS_BURST_THRESHOLD:
+    if len(history) < DNS_BURST_THRESHOLD:
+        return None
 
-        if src_ip in _dns_burst_alerted:
-            return None
-
-        _dns_burst_alerted.add(src_ip)
-
-        return {
-            "rule_id": "DNS_BURST_001",
-            "rule_name": "DNS Activity Burst",
-            "severity": "MEDIUM",
-            "description": (
-                f"{src_ip} generated {len(history)} "
-                f"DNS connections within "
-                f"{DNS_BURST_WINDOW_SECONDS} seconds"
-            ),
-        }
-
-    return None
+    return {
+        "rule_id": "DNS_BURST_001",
+        "rule_name": "Abnormal DNS Activity Burst",
+        "severity": "MEDIUM",
+        "description": (
+            f"{src_ip} generated {len(history)} DNS connections "
+            f"within {DNS_BURST_WINDOW_SECONDS} seconds"
+        ),
+        "mitre_technique": "T1071.004",
+        "mitre_tactic": "Command and Control",
+        "evidence": {
+            "dns_connections": len(history),
+            "window_seconds": DNS_BURST_WINDOW_SECONDS,
+        },
+    }
 
 
 # ============================================================
-# OPTIONAL STATE CLEANUP
+# RESET FUNCTION
 # ============================================================
 
-def clear_detection_state():
+def reset_detection_state():
     """
-    Clear all state maintained by the detection rules.
+    Clear all stateful detection windows.
 
-    Useful when restarting/replaying a dataset during testing.
+    Useful when starting a fresh replay/test session.
     """
 
+    _failed_connection_history.clear()
     _port_history.clear()
-    _failed_conn_history.clear()
     _dns_history.clear()
-
-    _port_scan_alerted.clear()
-    _failed_alerted.clear()
-    _dns_burst_alerted.clear()
