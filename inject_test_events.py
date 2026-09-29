@@ -1,59 +1,232 @@
 import json
 import time
+
 from kafka import KafkaProducer
 
 
 # ============================================================
-# CONFIGURATION
+# KAFKA CONFIGURATION
 # ============================================================
 
 KAFKA_SERVER = "localhost:9092"
-TOPIC = "zeekdata-stream"
+KAFKA_TOPIC = "zeekdata-stream"
 
 
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_SERVER,
-    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
 )
 
 
-def send_event(event):
-    """Send one event to Kafka."""
-    producer.send(TOPIC, event)
-    producer.flush()
+# ============================================================
+# TEST CONFIGURATION
+# ============================================================
 
-    print(
-        f"  SENT: {event.get('src_ip')} -> "
-        f"{event.get('dest_ip')}:{event.get('dest_port')} "
-        f"| service={event.get('service')} "
-        f"| state={event.get('conn_state')}"
-    )
+BASE_TIMESTAMP = time.time()
+
+
+def make_zeek_event(
+    timestamp,
+    src_ip,
+    dest_ip,
+    src_port,
+    dest_port,
+    proto="tcp",
+    service=None,
+    conn_state="SF",
+    orig_bytes=100,
+    resp_bytes=100,
+):
+    """
+    Create a Zeek conn.log-style event.
+
+    These fields intentionally resemble the records coming
+    through the Docker/Zeek pipeline.
+    """
+
+    if service is None:
+        if dest_port == 53:
+            service = "dns"
+        elif dest_port == 22:
+            service = "ssh"
+        elif dest_port == 443:
+            service = "ssl"
+        else:
+            service = "-"
+
+    return {
+        "ts": timestamp,
+
+        "src_ip": src_ip,
+        "dest_ip": dest_ip,
+
+        "src_port": src_port,
+        "dest_port": dest_port,
+
+        "proto": proto,
+        "service": service,
+
+        "conn_state": conn_state,
+
+        "orig_pkts": 2,
+        "resp_pkts": 0,
+
+        "orig_bytes": orig_bytes,
+        "resp_bytes": resp_bytes,
+
+        "orig_ip_bytes": orig_bytes + 40,
+        "resp_ip_bytes": resp_bytes + 40,
+
+        "duration": 0.002,
+
+        "local_orig": True,
+        "local_resp": False,
+
+        "missed_bytes": 0,
+
+        "history": "S",
+
+        "community_id": "1:test-community-id",
+
+        "uid": f"TEST-{int(timestamp * 1000000)}",
+
+        "datetime": time.strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z",
+            time.gmtime(timestamp)
+        ),
+
+        # Metadata used by your SIEM pipeline.
+        "tactic": "Benign",
+
+        "source_release": "SIEM-Test-Injection",
+    }
 
 
 # ============================================================
-# RULE 1 — PORT SCAN
+# KAFKA SEND FUNCTION
+# ============================================================
+
+def send_event(event, description, expected_rule=None):
+    """
+    Send one event to Kafka and display exactly what it is testing.
+    """
+
+    print()
+    print("=" * 70)
+    print(description)
+
+    if expected_rule:
+        print(f"Expected detection: {expected_rule}")
+    else:
+        print("Expected detection: NONE")
+
+    print("-" * 70)
+    print("Sending:")
+
+    print(json.dumps(event, indent=2))
+
+    producer.send(
+        KAFKA_TOPIC,
+        value=event,
+    )
+
+    producer.flush()
+
+    print("Sent to Kafka.")
+    print("=" * 70)
+
+
+# ============================================================
+# TEST 1
+# BRUTE FORCE
+# ============================================================
+
+def test_brute_force():
+    """
+    Generate repeated failed SSH connections from the same
+    source to the same destination.
+
+    Rule threshold:
+        8 failed connections
+        within 60 seconds
+    """
+
+    print()
+    print()
+    print("#" * 70)
+    print("TEST 1/4 — BRUTE FORCE")
+    print("#" * 70)
+
+    src_ip = "10.0.10.50"
+    dest_ip = "10.0.10.10"
+
+    start_time = BASE_TIMESTAMP + 10
+
+    for attempt in range(8):
+
+        event_time = start_time + attempt * 5
+
+        event = make_zeek_event(
+            timestamp=event_time,
+
+            src_ip=src_ip,
+            dest_ip=dest_ip,
+
+            src_port=40000 + attempt,
+            dest_port=22,
+
+            proto="tcp",
+            service="ssh",
+
+            # Failed/incomplete connection.
+            conn_state="REJ",
+
+            orig_bytes=0,
+            resp_bytes=0,
+        )
+
+        send_event(
+            event,
+
+            description=(
+                f"BRUTE FORCE ATTEMPT {attempt + 1}/8\n"
+                f"{src_ip} -> {dest_ip}:22"
+            ),
+
+            expected_rule=(
+                "BRUTE_FORCE_001"
+                if attempt == 7
+                else "NONE YET"
+            ),
+        )
+
+        time.sleep(0.1)
+
+
+# ============================================================
+# TEST 2
+# PORT SCAN
 # ============================================================
 
 def test_port_scan():
-    print("\n" + "=" * 70)
-    print("TEST 1: PORT SCAN")
-    print("=" * 70)
+    """
+    Generate connections to many distinct destination ports.
 
-    print(
-        "\nExpected detection:"
-        "\n  Rule ID: PORT_SCAN_001"
-        "\n  Rule: Possible Port Scan"
-        "\n  Severity: HIGH"
-        "\n"
-        "\nWhy:"
-        "\n  The same source IP will contact 11 different destination"
-        "\n  ports within a 30-second event-time window."
-    )
+    Rule threshold:
+        15 distinct ports
+        within 30 seconds
+    """
 
-    base_time = time.time()
+    print()
+    print()
+    print("#" * 70)
+    print("TEST 2/4 — PORT SCAN")
+    print("#" * 70)
 
-    src_ip = "192.168.10.50"
-    dest_ip = "192.168.10.100"
+    src_ip = "10.0.10.51"
+    dest_ip = "10.0.10.100"
+
+    start_time = BASE_TIMESTAMP + 100
 
     ports = [
         21,
@@ -63,183 +236,169 @@ def test_port_scan():
         53,
         80,
         110,
+        111,
+        135,
         139,
+        143,
         443,
         445,
-        3389,
+        993,
+        995,
     ]
 
-    print("\nSending port-scan pattern...")
+    for index, dest_port in enumerate(ports):
 
-    for i, port in enumerate(ports):
+        event = make_zeek_event(
+            timestamp=start_time + index,
 
-        event = {
-            "ts": base_time + i,
-            "src_ip": src_ip,
-            "dest_ip": dest_ip,
-            "src_port": 40000 + i,
-            "dest_port": port,
-            "proto": "tcp",
-            "service": "unknown",
-            "conn_state": "S0",
-            "tactic": "Discovery",
-            "source_release": "SIEM-Test-Injection",
-        }
+            src_ip=src_ip,
+            dest_ip=dest_ip,
 
-        send_event(event)
+            src_port=41000 + index,
+            dest_port=dest_port,
 
-    print("\nExpected result:")
-    print("  ✓ PORT_SCAN_001 should be generated")
+            proto="tcp",
+            service="-",
+
+            conn_state="S0",
+
+            orig_bytes=0,
+            resp_bytes=0,
+        )
+
+        send_event(
+            event,
+
+            description=(
+                f"PORT SCAN PROBE {index + 1}/{len(ports)}\n"
+                f"{src_ip} -> {dest_ip}:{dest_port}"
+            ),
+
+            expected_rule=(
+                "PORT_SCAN_001"
+                if index == len(ports) - 1
+                else "NONE YET"
+            ),
+        )
+
+        time.sleep(0.1)
 
 
 # ============================================================
-# RULE 2 — REPEATED CONNECTION FAILURES
+# TEST 3
+# LARGE OUTBOUND TRANSFER
 # ============================================================
 
-def test_brute_force():
-    print("\n" + "=" * 70)
-    print("TEST 2: REPEATED CONNECTION FAILURES")
-    print("=" * 70)
+def test_large_outbound_transfer():
+    """
+    Generate a large outbound connection.
 
-    print(
-        "\nExpected detection:"
-        "\n  Rule ID: BRUTE_FORCE_001"
-        "\n  Rule: Repeated Connection Failures"
-        "\n  Severity: HIGH"
-        "\n"
-        "\nWhy:"
-        "\n  The same source will make 6 failed connections to"
-        "\n  the same destination IP and destination port within 60 seconds."
+    Rule threshold:
+        50 MB
+        internal source -> external destination
+    """
+
+    print()
+    print()
+    print("#" * 70)
+    print("TEST 3/4 — LARGE OUTBOUND TRANSFER")
+    print("#" * 70)
+
+    event = make_zeek_event(
+        timestamp=BASE_TIMESTAMP + 200,
+
+        src_ip="10.0.10.52",
+
+        # External/public destination.
+        dest_ip="8.8.8.8",
+
+        src_port=45000,
+        dest_port=443,
+
+        proto="tcp",
+        service="ssl",
+
+        conn_state="SF",
+
+        # 75 MB.
+        orig_bytes=75 * 1024 * 1024,
+
+        resp_bytes=25000,
     )
 
-    base_time = time.time() + 100
+    send_event(
+        event,
 
-    src_ip = "192.168.20.50"
-    dest_ip = "192.168.20.100"
-    dest_port = 22
+        description=(
+            "Internal host transferring a large amount of data "
+            "to an external destination."
+        ),
 
-    print("\nSending repeated failed SSH connections...")
-
-    for i in range(6):
-
-        event = {
-            "ts": base_time + i,
-            "src_ip": src_ip,
-            "dest_ip": dest_ip,
-            "src_port": 41000 + i,
-            "dest_port": dest_port,
-            "proto": "tcp",
-            "service": "ssh",
-            "conn_state": "REJ",
-            "tactic": "Credential_Access",
-            "source_release": "SIEM-Test-Injection",
-        }
-
-        send_event(event)
-
-    print("\nExpected result:")
-    print("  ✓ BRUTE_FORCE_001 should be generated")
-
-
-# ============================================================
-# RULE 3 — LARGE OUTBOUND TRANSFER
-# ============================================================
-
-def test_exfiltration():
-    print("\n" + "=" * 70)
-    print("TEST 3: LARGE OUTBOUND TRANSFER")
-    print("=" * 70)
-
-    print(
-        "\nExpected detection:"
-        "\n  Rule ID: EXFIL_001"
-        "\n  Rule: Large Outbound Transfer"
-        "\n  Severity: MEDIUM"
-        "\n"
-        "\nWhy:"
-        "\n  One connection will contain more than 1 MB of"
-        "\n  outbound data."
+        expected_rule="EXFIL_001",
     )
 
-    event = {
-        "ts": time.time() + 200,
-        "src_ip": "192.168.30.50",
-        "dest_ip": "203.0.113.50",
-        "src_port": 45000,
-        "dest_port": 443,
-        "proto": "tcp",
-        "service": "https",
-        "conn_state": "SF",
-
-        # 2 MB
-        "orig_bytes": 2_000_000,
-
-        "resp_bytes": 5000,
-        "orig_pkts": 2000,
-        "resp_pkts": 20,
-
-        "tactic": "Exfiltration",
-        "source_release": "SIEM-Test-Injection",
-    }
-
-    print("\nSending large outbound transfer event...")
-
-    send_event(event)
-
-    print("\nExpected result:")
-    print("  ✓ EXFIL_001 should be generated")
-
 
 # ============================================================
-# RULE 4 — DNS BURST
+# TEST 4
+# DNS BURST
 # ============================================================
 
 def test_dns_burst():
-    print("\n" + "=" * 70)
-    print("TEST 4: DNS ACTIVITY BURST")
-    print("=" * 70)
+    """
+    Generate many DNS connections from one source.
 
-    print(
-        "\nExpected detection:"
-        "\n  Rule ID: DNS_BURST_001"
-        "\n  Rule: DNS Activity Burst"
-        "\n  Severity: MEDIUM"
-        "\n"
-        "\nWhy:"
-        "\n  The same source IP will generate 16 DNS connections"
-        "\n  within a 30-second event-time window."
-    )
+    Rule threshold:
+        25 DNS connections
+        within 30 seconds
+    """
 
-    base_time = time.time() + 300
+    print()
+    print()
+    print("#" * 70)
+    print("TEST 4/4 — DNS ACTIVITY BURST")
+    print("#" * 70)
 
-    src_ip = "192.168.40.50"
-    dest_ip = "8.8.8.8"
+    src_ip = "10.0.10.53"
+    dest_ip = "10.0.10.1"
 
-    print("\nSending DNS burst...")
+    start_time = BASE_TIMESTAMP + 300
 
-    for i in range(16):
+    for index in range(25):
 
-        event = {
-            "ts": base_time + i,
-            "src_ip": src_ip,
-            "dest_ip": dest_ip,
-            "src_port": 50000 + i,
-            "dest_port": 53,
-            "proto": "udp",
-            "service": "dns",
-            "conn_state": "SF",
+        event = make_zeek_event(
+            timestamp=start_time + index,
 
-            "orig_bytes": 100,
-            "resp_bytes": 200,
+            src_ip=src_ip,
+            dest_ip=dest_ip,
 
-            "tactic": "Command_and_Control",
-            "source_release": "SIEM-Test-Injection",
-        }
+            src_port=50000 + index,
+            dest_port=53,
 
-        send_event(event)
+            proto="udp",
+            service="dns",
 
-    print("\nExpected result:")
-    print("  ✓ DNS_BURST_001 should be generated")
+            conn_state="S0",
+
+            orig_bytes=78,
+            resp_bytes=0,
+        )
+
+        send_event(
+            event,
+
+            description=(
+                f"DNS CONNECTION {index + 1}/25\n"
+                f"{src_ip} -> {dest_ip}:53"
+            ),
+
+            expected_rule=(
+                "DNS_BURST_001"
+                if index == 24
+                else "NONE YET"
+            ),
+        )
+
+        time.sleep(0.1)
 
 
 # ============================================================
@@ -248,49 +407,59 @@ def test_dns_burst():
 
 def main():
 
-    print("\n")
+    print()
     print("=" * 70)
-    print(" SENTINELSTREAM — SECURITY RULE INJECTION TEST")
+    print("SENTINELSTREAM — SIEM RULE TEST INJECTION")
     print("=" * 70)
 
-    print("\nKafka:")
-    print(f"  Server: {KAFKA_SERVER}")
-    print(f"  Topic:  {TOPIC}")
+    print()
+    print(f"Kafka broker : {KAFKA_SERVER}")
+    print(f"Kafka topic  : {KAFKA_TOPIC}")
 
-    print("\nThis test will generate events for ALL FOUR rules:")
-    print("  1. PORT_SCAN_001")
-    print("  2. BRUTE_FORCE_001")
-    print("  3. EXFIL_001")
-    print("  4. DNS_BURST_001")
+    print()
+    print("This test will generate:")
+    print()
+    print("1. BRUTE_FORCE_001")
+    print("2. PORT_SCAN_001")
+    print("3. EXFIL_001")
+    print("4. DNS_BURST_001")
 
-    print("\nStarting tests...")
+    print()
+    print("All events use Zeek-style connection telemetry.")
+    print("Starting tests...")
 
-    test_port_scan()
+    # --------------------------------------------------------
+    # Run tests
+    # --------------------------------------------------------
 
     test_brute_force()
 
-    test_exfiltration()
+    test_port_scan()
+
+    test_large_outbound_transfer()
 
     test_dns_burst()
 
+    # --------------------------------------------------------
+    # Finish
+    # --------------------------------------------------------
+
     producer.flush()
 
-    print("\n")
+    print()
+    print()
     print("=" * 70)
     print("ALL TEST EVENTS SENT")
     print("=" * 70)
 
-    print(
-        "\nCheck your FastAPI terminal."
-        "\nYou should see 'Received:' followed by 'ALERT:' messages."
-    )
-
-    print(
-        "\nThen check the SentinelStream frontend."
-        "\nThe generated alerts should appear in your Alerts section."
-    )
-
-    producer.close()
+    print()
+    print("Expected rules:")
+    print()
+    print("  BRUTE_FORCE_001")
+    print("  PORT_SCAN_001")
+    print("  EXFIL_001")
+    print("  DNS_BURST_001")
+    print()
 
 
 if __name__ == "__main__":
