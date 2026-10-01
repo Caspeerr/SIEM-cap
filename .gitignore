@@ -20,7 +20,6 @@ htmlcov/
 Frontend/node_modules/
 Frontend/dist/
 Frontend/build/
-Frontend/.vite/
 Frontend/.cache/
 Frontend/coverage/
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AlertsPanel from "../components/AlertsPanel";
 import {
   Activity,
@@ -59,6 +59,18 @@ type SecurityAlert = {
   tactic?: string;
 };
 
+type OverviewSummary = {
+  kafka_connected: boolean;
+  events_per_second: number;
+  events_last_minute: number;
+  alert_count: number;
+  top_alert_sources: { src_ip: string; count: number }[];
+  alerts_by_rule: Record<string, number>;
+  event_rate_series: number[];
+  recent_alerts: SecurityAlert[];
+  last_event_at: string | null;
+};
+
 type StreamMessage = {
   type: "log";
   event: SecurityEvent;
@@ -116,57 +128,6 @@ const navItems: {
     key: "docs",
     label: "Documentation",
     icon: BookOpen,
-  },
-];
-
-/*
- * These are kept for the overview UI.
- * The actual live alerts are shown in AlertsView.
- */
-const incidents = [
-  {
-    title: "Brute-force authentication pattern",
-    ip: "185.220.101.42",
-    age: "2m ago",
-    level: "critical",
-    score: "92",
-  },
-  {
-    title: "Port scan across public edge",
-    ip: "45.141.84.19",
-    age: "8m ago",
-    level: "high",
-    score: "81",
-  },
-  {
-    title: "Impossible travel detected",
-    ip: "103.82.118.7",
-    age: "14m ago",
-    level: "medium",
-    score: "68",
-  },
-];
-
-const sources = [
-  {
-    ip: "185.220.101.42",
-    count: 86,
-    color: "coral",
-  },
-  {
-    ip: "45.141.84.19",
-    count: 65,
-    color: "amber",
-  },
-  {
-    ip: "103.82.118.7",
-    count: 49,
-    color: "gold",
-  },
-  {
-    ip: "91.240.118.11",
-    count: 31,
-    color: "mint",
   },
 ];
 
@@ -237,23 +198,14 @@ function MetricCard({
   );
 }
 
-function EventChart({ tick }: { tick: number }) {
-  const points = useMemo(() => {
-    const base = [
-      22, 25, 34, 31, 40, 33, 46, 50, 36, 26, 41, 49, 47, 57, 51, 56, 54,
-      64, 57, 67,
-    ];
-
-    return base.map(
-      (value, index) => value + Math.sin((tick + index) / 5) * 2.5
-    );
-  }, [tick]);
-
-  const line = points
-    .map((value, index) => `${index * 5.1 + 2},${100 - value}`)
-    .join(" ");
-
-  const area = `2,100 ${line} 99,100`;
+function EventChart({ rates }: { rates: number[] }) {
+  const maxRate = Math.max(...rates, 1);
+  const points = rates.map((rate, index) => ({
+    x: index * (97 / Math.max(rates.length - 1, 1)) + 2,
+    y: 96 - (rate / maxRate) * 82,
+  }));
+  const line = points.map(({ x, y }) => `${x},${y}`).join(" ");
+  const area = points.length ? `2,100 ${line} 99,100` : "";
 
   return (
     <div
@@ -261,10 +213,10 @@ function EventChart({ tick }: { tick: number }) {
       aria-label="Event velocity line chart"
     >
       <div className="chart-y-axis">
-        <span>3k</span>
-        <span>2k</span>
-        <span>1k</span>
-        <span>0</span>
+        <span>{maxRate.toFixed(1)}/s</span>
+        <span>{(maxRate * 0.66).toFixed(1)}/s</span>
+        <span>{(maxRate * 0.33).toFixed(1)}/s</span>
+        <span>0/s</span>
       </div>
 
       <svg
@@ -304,30 +256,23 @@ function EventChart({ tick }: { tick: number }) {
           />
         ))}
 
-        <polygon
-          points={area}
-          fill="url(#eventFill)"
-        />
-
-        <polyline
-          points={line}
-          fill="none"
-          className="chart-line"
-        />
-
-        <circle
-          cx={points.length * 5.1 - 3}
-          cy={100 - points[points.length - 1]}
-          r="1.7"
-          className="chart-last"
-        />
+        {points.length > 0 && <polygon points={area} fill="url(#eventFill)" />}
+        {points.length > 0 && <polyline points={line} fill="none" className="chart-line" />}
+        {points.length > 0 && (
+          <circle
+            cx={points[points.length - 1].x}
+            cy={points[points.length - 1].y}
+            r="1.7"
+            className="chart-last"
+          />
+        )}
       </svg>
 
       <div className="chart-x-axis">
-        <span>15:30</span>
-        <span>15:35</span>
-        <span>15:40</span>
-        <span>15:42</span>
+        <span>60s ago</span>
+        <span>40s ago</span>
+        <span>20s ago</span>
+        <span>Now</span>
       </div>
     </div>
   );
@@ -370,11 +315,17 @@ function SectionHeading({
 
 function Overview({
   onNotice,
-  tick,
+  summary,
 }: {
   onNotice: (message: string) => void;
-  tick: number;
+  summary: OverviewSummary | null;
 }) {
+  const sourceColors = ["coral", "amber", "gold", "mint"];
+  const maxSourceCount = Math.max(
+    ...(summary?.top_alert_sources.map((source) => source.count) ?? []),
+    1
+  );
+
   return (
     <>
       <div className="breadcrumb">
@@ -393,11 +344,9 @@ function Overview({
 
         <div className="header-actions">
           <span className="live-pill">
-            <StatusDot />
-            Live stream{" "}
-            <strong>
-              {(2.418 + (tick % 6) / 100).toFixed(1)}k events/s
-            </strong>
+            <StatusDot tone={summary?.kafka_connected ? "green" : "red"} />
+            {summary?.kafka_connected ? "Kafka connected" : "Kafka disconnected"}{" "}
+            <strong>{(summary?.events_per_second ?? 0).toFixed(2)} events/s</strong>
           </span>
 
           <button
@@ -428,37 +377,37 @@ function Overview({
 
       <div className="metrics-grid">
         <MetricCard
-          label="Events / sec"
-          value={tick % 7 === 0 ? "2,431" : "2,418"}
-          trend="+12.6% vs. yesterday"
-          trendTone="up"
+          label="Events (last minute)"
+          value={(summary?.events_last_minute ?? 0).toLocaleString()}
+          trend="records consumed by API"
+          trendTone="down"
           icon={Activity}
           accent="#72e8c0"
         />
 
         <MetricCard
-          label="Open incidents"
-          value="12"
-          trend="+3 today vs. yesterday"
-          trendTone="up"
+          label="Alerts (API session)"
+          value={String(summary?.alert_count ?? 0)}
+          trend="rule matches recorded"
+          trendTone="down"
           icon={AlertOctagon}
           accent="#ff7c74"
         />
 
         <MetricCard
-          label="Mean risk score"
-          value="68.4"
-          trend="+5.2 pts vs. yesterday"
-          trendTone="up"
+          label="Matched rules"
+          value={String(Object.keys(summary?.alerts_by_rule ?? {}).length)}
+          trend="distinct rules with detections"
+          trendTone="down"
           icon={Gauge}
           accent="#e3b96b"
         />
 
         <MetricCard
-          label="Kafka lag"
-          value="34 ms"
-          trend="-18.3% vs. yesterday"
-          trendTone="down"
+          label="Kafka status"
+          value={summary?.kafka_connected ? "Online" : "Offline"}
+          trend={summary?.kafka_connected ? "consumer connected" : "waiting for broker"}
+          trendTone={summary?.kafka_connected ? "down" : "up"}
           icon={Zap}
           accent="#8b9fff"
         />
@@ -470,12 +419,10 @@ function Overview({
             eyebrow="Live telemetry"
             title="Event velocity"
             action="Open stream"
-            onAction={() =>
-              onNotice("Opening the live event stream…")
-            }
+            onAction={() => onNotice("Open Live Logs to inspect individual events.")}
           />
 
-          <EventChart tick={tick} />
+          <EventChart rates={summary?.event_rate_series ?? []} />
 
           <div className="chart-legend">
             <span>
@@ -489,7 +436,7 @@ function Overview({
             </span>
 
             <strong>
-              Peak <b>2,842/s</b>
+              Current <b>{(summary?.events_per_second ?? 0).toFixed(2)}/s</b>
             </strong>
           </div>
         </section>
@@ -498,54 +445,54 @@ function Overview({
           <SectionHeading
             eyebrow="Priority queue"
             title="Open incidents"
-            action="12"
+            action={String(summary?.alert_count ?? 0)}
             onAction={() =>
-              onNotice(
-                "12 open incidents are currently prioritized by risk score."
-              )
+              onNotice("Open Alerts to inspect detections recorded by this API session.")
             }
           />
 
           <div className="incident-list">
-            {incidents.map((incident) => (
+            {(summary?.recent_alerts ?? []).map((incident, index) => (
               <button
                 className="incident-row"
-                key={incident.title}
+                key={`${incident.rule_id}-${incident.timestamp}-${index}`}
                 onClick={() =>
-                  onNotice(
-                    `${incident.title} · risk score ${incident.score}`
-                  )
+                  onNotice(`${incident.rule_name}: ${incident.description}`)
                 }
               >
                 <span
-                  className={`incident-bar ${incident.level}`}
+                  className={`incident-bar ${incident.severity.toLowerCase()}`}
                 />
 
                 <span className="incident-copy">
-                  <strong>{incident.title}</strong>
+                  <strong>{incident.rule_name}</strong>
 
                   <small>
-                    {incident.ip} <i>·</i> {incident.age}
+                    {incident.src_ip ?? "Unknown source"} <i>·</i> {incident.rule_id}
                   </small>
                 </span>
 
                 <span
-                  className={`risk-chip ${incident.level}`}
+                  className={`risk-chip ${incident.severity.toLowerCase()}`}
                 >
-                  {incident.score}
+                  {incident.severity}
                 </span>
 
                 <ChevronRight size={15} />
               </button>
             ))}
+            {(!summary || summary.recent_alerts.length === 0) && (
+              <div className="incident-copy">
+                <strong>{summary ? "No detections yet" : "Waiting for API"}</strong>
+                <small>{summary ? "No rules have matched in this API session." : "Live overview data unavailable."}</small>
+              </div>
+            )}
           </div>
 
           <button
             className="view-all"
             onClick={() =>
-              onNotice(
-                "Incident queue expanded — use Alerts in the sidebar for triage."
-              )
+              onNotice("Open Alerts in the sidebar to inspect current detections.")
             }
           >
             View all incidents
@@ -560,20 +507,20 @@ function Overview({
           />
 
           <div className="source-list">
-            {sources.map((source, index) => (
+            {(summary?.top_alert_sources ?? []).map((source, index) => (
               <div
                 className="source-row"
-                key={source.ip}
+                key={source.src_ip}
               >
                 <span className="source-ip">
-                  {source.ip}
+                  {source.src_ip}
                 </span>
 
                 <div className="source-track">
                   <span
-                    className={source.color}
+                    className={sourceColors[index % sourceColors.length]}
                     style={{
-                      width: `${(source.count / 90) * 100}%`,
+                      width: `${(source.count / maxSourceCount) * 100}%`,
                     }}
                   />
                 </div>
@@ -585,6 +532,9 @@ function Overview({
                 </span>
               </div>
             ))}
+            {(!summary || summary.top_alert_sources.length === 0) && (
+              <div className="toolbar-muted">No alerting sources recorded.</div>
+            )}
           </div>
         </section>
 
@@ -604,7 +554,7 @@ function Overview({
             <TopologyNode
               icon={Globe2}
               label="Collectors"
-              value="8 online"
+              value="Not connected"
               tone="mint"
             />
 
@@ -613,7 +563,7 @@ function Overview({
             <TopologyNode
               icon={Layers3}
               label="Kafka topics"
-              value="6 active"
+              value={summary?.kafka_connected ? "Connected" : "Offline"}
               tone="blue"
             />
 
@@ -622,7 +572,7 @@ function Overview({
             <TopologyNode
               icon={Shield}
               label="Detection"
-              value="99.1%"
+              value={`${Object.keys(summary?.alerts_by_rule ?? {}).length} matched`}
               tone="amber"
             />
 
@@ -631,7 +581,7 @@ function Overview({
             <TopologyNode
               icon={Server}
               label="Storage"
-              value="Healthy"
+              value="In memory"
               tone="mint"
             />
           </div>
@@ -674,11 +624,42 @@ function LogsView({
 }) {
   const [logs, setLogs] = useState<SecurityEvent[]>([]);
   const [connected, setConnected] = useState(false);
+  const [kafkaConnected, setKafkaConnected] = useState(false);
   const [paused, setPaused] = useState(false);
 
   useEffect(() => {
+    let active = true;
+
+    const checkKafka = async () => {
+      try {
+        const response = await fetch("/api/health");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const health = await response.json();
+        if (active) {
+          setKafkaConnected(Boolean(health.kafka_connected));
+        }
+      } catch {
+        if (active) {
+          setKafkaConnected(false);
+        }
+      }
+    };
+
+    void checkKafka();
+    const timer = window.setInterval(() => void checkKafka(), 3000);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     const eventSource = new EventSource(
-      "http://localhost:8000/api/logs/stream"
+      "/api/logs/stream"
     );
 
     eventSource.onopen = () => {
@@ -805,17 +786,19 @@ function LogsView({
     <WorkspaceView
       eyebrow="Live telemetry"
       title="Live event stream"
-      description="Inspect normalized security events as they arrive from the SentinelStream pipeline."
+      description="Inspect normalized security events as they arrive from the Cap Scan pipeline."
     >
       <div className="stream-toolbar">
         <span className="live-pill">
           <StatusDot
-            tone={connected ? "green" : "red"}
+            tone={connected && kafkaConnected ? "green" : "red"}
           />
 
-          {connected
+          {connected && kafkaConnected
             ? "Streaming now"
-            : "Disconnected"}
+            : connected
+              ? "API connected, Kafka unavailable"
+              : "Disconnected"}
         </span>
 
         <span className="toolbar-muted">
@@ -923,7 +906,7 @@ function AlertsView({
   const loadAlerts = async () => {
     try {
       const response = await fetch(
-        "http://localhost:8000/api/alerts"
+        "/api/alerts"
       );
 
       if (!response.ok) {
@@ -1225,7 +1208,7 @@ function SimpleView({
     docs: {
       eyebrow: "Reference",
       title: "Documentation",
-      desc: "Architecture notes, event schemas, and operating guidance for SentinelStream.",
+      desc: "Architecture notes, event schemas, and operating guidance for Cap Scan.",
       icon: BookOpen,
       tone: "mint",
     },
@@ -1289,8 +1272,8 @@ export default function Home() {
   const [toast, setToast] =
     useState("");
 
-  const [tick, setTick] =
-    useState(0);
+  const [overviewSummary, setOverviewSummary] =
+    useState<OverviewSummary | null>(null);
 
   /*
    * Stores alerts received from the live SSE stream.
@@ -1299,16 +1282,32 @@ export default function Home() {
     useState<SecurityAlert[]>([]);
 
   useEffect(() => {
-    const timer = window.setInterval(
-      () =>
-        setTick(
-          (value) => value + 1
-        ),
-      4000
-    );
+    let active = true;
 
-    return () =>
+    const loadSummary = async () => {
+      try {
+        const response = await fetch("/api/summary");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const summary = (await response.json()) as OverviewSummary;
+        if (active) {
+          setOverviewSummary(summary);
+        }
+      } catch {
+        if (active) {
+          setOverviewSummary(null);
+        }
+      }
+    };
+
+    void loadSummary();
+    const timer = window.setInterval(() => void loadSummary(), 3000);
+
+    return () => {
+      active = false;
       window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -1332,14 +1331,14 @@ export default function Home() {
     setSidebarOpen(false);
   };
 
-  const handleNewAlerts = (
+  const handleNewAlerts = useCallback((
     newAlerts: SecurityAlert[]
   ) => {
     setLiveAlerts((previous) => [
       ...newAlerts,
       ...previous,
     ].slice(0, 100));
-  };
+  }, []);
 
   return (
     <div className="app-shell">
@@ -1353,7 +1352,7 @@ export default function Home() {
 
           <div>
             <strong>
-              Sentinel<span>Stream</span>
+              Cap<span> Scan</span>
             </strong>
 
             <small>
@@ -1422,21 +1421,19 @@ export default function Home() {
 
         <div className="pipeline-card">
           <div className="pipeline-label">
-            <StatusDot />
+            <StatusDot tone={overviewSummary?.kafka_connected ? "green" : "red"} />
             PIPELINE HEALTH
           </div>
 
           <strong>
-            99.98%{" "}
-            <small>nominal</small>
+            {overviewSummary?.kafka_connected ? "Connected" : "Offline"}{" "}
+            <small>{overviewSummary ? "Kafka consumer" : "API unavailable"}</small>
           </strong>
 
-          <div className="pipeline-meter">
-            <span />
-          </div>
-
           <p>
-            Kafka cluster · 1 broker online
+            {overviewSummary?.kafka_connected
+              ? `${overviewSummary.events_last_minute.toLocaleString()} events in the last minute`
+              : "Waiting for the API and Kafka broker"}
           </p>
         </div>
 
@@ -1516,7 +1513,7 @@ export default function Home() {
         {view === "overview" && (
           <Overview
             onNotice={setToast}
-            tick={tick}
+            summary={overviewSummary}
           />
         )}
 
@@ -1548,20 +1545,18 @@ export default function Home() {
 
         <footer className="app-footer">
           <span>
-            <StatusDot />
-            All systems operational
+            <StatusDot tone={overviewSummary?.kafka_connected ? "green" : "red"} />
+            {overviewSummary?.kafka_connected ? "Kafka connected" : "Backend unavailable"}
           </span>
 
           <span>
-            Last sync 15:42:
-            {String(
-              18 + (tick % 7)
-            ).padStart(2, "0")}{" "}
-            UTC
+            {overviewSummary?.last_event_at
+              ? `Last event ${new Date(overviewSummary.last_event_at).toLocaleTimeString()}`
+              : "No events received this API session"}
           </span>
 
           <span>
-            SentinelStream
+            Cap Scan
             v0.9.4-demo
           </span>
         </footer>

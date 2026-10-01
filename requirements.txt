@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 kafka-python
 pandas
+psycopg2-binary

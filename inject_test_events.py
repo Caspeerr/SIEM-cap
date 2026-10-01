@@ -409,7 +409,7 @@ def main():
 
     print()
     print("=" * 70)
-    print("SENTINELSTREAM — SIEM RULE TEST INJECTION")
+    print("CAP SCAN — SIEM RULE TEST INJECTION")
     print("=" * 70)
 
     print()

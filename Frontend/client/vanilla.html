@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070c10">
+  <meta name="description" content="Cap Scan live security monitoring dashboard">
+  <title>Cap Scan | SOC</title>
+  <link rel="stylesheet" href="/dashboard-assets/dashboard.css">
+  <link rel="stylesheet" href="/dashboard-assets/dashboard-detail.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/dashboard" aria-label="Cap Scan dashboard">
+      <span class="brand-mark" aria-hidden="true">C</span>
+      <span>Cap <span class="accent">Scan</span><small>SECURITY OPERATIONS</small></span>
+    </a>
+    <div class="health"><i id="api-dot" class="dot"></i><span id="api-status">API</span><span class="divider"></span><i id="kafka-dot" class="dot"></i><span id="kafka-status">Kafka</span><span class="divider"></span><i id="db-dot" class="dot"></i><span id="db-status">Database</span></div>
+  </header>
+  <main>
+    <section class="heading">
+      <div><p class="eyebrow">CAP SCAN / SECURITY OPERATIONS</p><h1 id="page-title">Operations overview</h1><p id="page-description" class="subheading">Network activity, detection trends, and system health</p></div>
+      <span id="stream-state" class="stream-state"><i class="dot"></i> STREAM STARTING</span>
+    </section>
+    <nav class="view-tabs" role="tablist" aria-label="Dashboard views">
+      <button class="view-tab active" type="button" role="tab" aria-selected="true" data-view="overview">Overview</button>
+      <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="events">Live events <span id="event-tab-count">0</span></button>
+      <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="alerts">Alerts <span id="alert-tab-count">0</span></button>
+    </nav>
+
+    <section id="overview-view" class="dashboard-view" role="tabpanel" aria-labelledby="view-overview">
+      <section class="metrics" aria-label="Live metrics">
+        <article class="metric"><span>EVENTS / MIN</span><strong id="events-minute">0</strong><small>Rolling 60-second window</small></article>
+        <article class="metric"><span>EVENT RATE</span><strong id="event-rate">0.00<em>/s</em></strong><small>Average over the last minute</small></article>
+        <article class="metric"><span>STORED ALERTS</span><strong id="alert-count">0</strong><small>Alerts in recent database history</small></article>
+        <article class="metric"><span>OBSERVED SOURCES</span><strong id="source-count">0</strong><small>Distinct source IPs in recent events</small></article>
+      </section>
+
+      <section class="overview-primary">
+        <article class="panel chart-panel">
+          <div class="panel-heading"><div><p class="eyebrow">INGESTION ACTIVITY</p><h2>Event velocity</h2></div><span id="chart-current-rate" class="chart-value">0.00 / sec</span></div>
+          <div class="chart-wrap"><svg id="rate-chart" viewBox="0 0 100 48" preserveAspectRatio="none" role="img" aria-label="Events per second over the last minute"></svg></div>
+          <div class="chart-axis"><span>60 sec ago</span><span>45 sec</span><span>30 sec</span><span>15 sec</span><span>Now</span></div>
+          <div class="chart-foot"><span><i class="legend-dot"></i> Events per second</span><span id="chart-window-count">0 events in window</span></div>
+        </article>
+        <article class="panel severity-panel">
+          <div class="panel-heading"><div><p class="eyebrow">ALERT DISTRIBUTION</p><h2>Severity breakdown</h2></div><span id="severity-total" class="count">0</span></div>
+          <div id="severity-breakdown" class="breakdown-list"></div>
+          <p class="panel-foot">Based on the latest stored alert records</p>
+        </article>
+      </section>
+
+      <section class="overview-secondary">
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">SOURCE ACTIVITY</p><h2>Top talkers</h2></div><button class="text-link" type="button" data-open-view="events">View events <span aria-hidden="true">→</span></button></div>
+          <div id="top-sources" class="breakdown-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">DETECTION ENGINE</p><h2>Rules generating alerts</h2></div><span class="count">8 rules</span></div>
+          <div id="rule-breakdown" class="breakdown-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">LATEST SIGNALS</p><h2>Recent alerts</h2></div><button class="text-link" type="button" data-open-view="alerts">All alerts <span aria-hidden="true">→</span></button></div>
+          <div id="recent-alerts" class="compact-alert-list"></div>
+        </article>
+      </section>
+    </section>
+
+    <section id="events-view" class="dashboard-view" role="tabpanel" hidden>
+      <article class="panel full-view-panel">
+        <div class="panel-heading full-view-heading"><div><p class="eyebrow">RAW CONNECTION RECORDS</p><h2>Live event history</h2><p class="panel-subtitle">Newest events first. Select a row to inspect its full Zeek fields.</p></div><div class="view-controls"><label class="search"><span aria-hidden="true">⌕</span><input id="event-search" type="search" placeholder="Filter IP, service, state" aria-label="Filter events"></label><button id="refresh-events" class="icon-button" type="button" aria-label="Reload event history" title="Reload event history">↻</button></div></div>
+        <div class="table-wrap"><table><thead><tr><th>TIME</th><th>SOURCE</th><th>DESTINATION</th><th>SERVICE / PROTOCOL</th><th>STATE</th><th>DURATION</th><th>ORIGIN / RESPONSE BYTES</th><th>DETECTIONS</th><th></th></tr></thead><tbody id="events-body"><tr><td colspan="9" class="empty">Loading stored events…</td></tr></tbody></table></div>
+        <p class="panel-foot"><span id="event-total">Loading event history</span><span>Showing up to 500 records</span></p>
+      </article>
+    </section>
+
+    <section id="alerts-view" class="dashboard-view" role="tabpanel" hidden>
+      <article class="panel full-view-panel">
+        <div class="panel-heading full-view-heading"><div><p class="eyebrow">BEHAVIOR-BASED DETECTIONS</p><h2>Alert investigation</h2><p class="panel-subtitle">Each alert links to the connection record that triggered it.</p></div><div class="view-controls"><label class="search"><span aria-hidden="true">⌕</span><input id="alert-search" type="search" placeholder="Filter rule, IP, technique" aria-label="Filter alerts"></label><select id="severity-filter" aria-label="Filter by severity"><option value="all">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
+        <div id="alerts-list" class="alerts-grid"><p class="empty">Loading stored alerts…</p></div>
+        <p class="panel-foot"><span id="alert-total">Loading alert history</span><span>Showing up to 500 records</span></p>
+      </article>
+    </section>
+    <footer><span><i id="footer-dot" class="dot"></i><span id="footer-db">Database status loading</span></span><span id="last-event">No events received yet</span><span>Source: Zeek connection telemetry</span></footer>
+  </main>
+  <script src="/dashboard-assets/dashboard-detail.js" defer></script>
+</body>
+</html>

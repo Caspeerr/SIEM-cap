@@ -1,6 +1,6 @@
-# SentinelStream Local Prototype
+# Cap Scan Local Prototype
 
-A self-contained React/Vite recreation of the SentinelStream security observability dashboard prototype.
+A self-contained React/Vite recreation of the Cap Scan security observability dashboard prototype.
 
 ## What is included
 
@@ -15,7 +15,7 @@ A self-contained React/Vite recreation of the SentinelStream security observabil
 ### Option A — one-click script
 
 1. Install **Node.js LTS** from <https://nodejs.org/> if it is not already installed.
-2. Extract the `sentinelstream-local.zip` archive to a folder you can access.
+2. Extract the `cap-scan.zip` archive to a folder you can access.
 3. Double-click `run-local.bat`.
 4. When the terminal says the server is ready, open <http://localhost:3000/> in your browser.
 5. Keep the terminal window open while using the site. Press `Ctrl+C` in that window to stop the server.

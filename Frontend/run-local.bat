@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 echo.
-echo  SentinelStream Local Prototype
+echo  Cap Scan Local Prototype
 echo  ------------------------------
 echo.
 

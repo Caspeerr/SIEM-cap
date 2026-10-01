@@ -1,0 +1,11 @@
+# Terminal 1
+docker compose up -d
+
+# Terminal 2
+python3 -m uvicorn api:app --host 0.0.0.0 --port 8000
+
+# Browser
+http://localhost:8000/
+
+# Terminal 3, only to replay the dataset
+python3 stream_producer.py
